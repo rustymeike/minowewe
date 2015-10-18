@@ -1,0 +1,228 @@
+// minowewe141010
+//
+// Copyright Rusty Meike 10/10/2014
+//
+// "minowewe" is the Ojibwe word for "makes a good sound"
+//
+// Purpose: Previous "sparkels" converted to the more sophisticated "Shimmers".
+//          Unicorn remains.
+//          Removed some commented code that is no longer in contention for useablilty.
+//
+// Note: Comparison of toggleTime to millis() will cause this program to fail
+//       after about fifty days of continuous operation due to unsigned longInt overflow.
+//       Cycle the power to restart. You weren't really listening that long anyway.
+
+#include <Fluxamasynth.h>
+
+Fluxamasynth synth;
+
+struct voice {
+  byte pitch;                 // MIDI pitch
+  byte velocity;              // MIDI velocity
+  byte state;                 // Is the voice currently on? T/F
+  long toggleTime;            // Future time to turn note on or off
+  byte maxVol;                // Maximum MIDI volume level for this voice's channel
+} 
+
+voice[4];                        // Set up four voices.
+
+byte longPulse;                  // Tracks a cyclical wave of sound intensity
+
+byte starterNote;                // base from which to calculate note offsets. 
+
+byte noteBase[3][11] = {         // MIDI note number offsets. Repetition makes them more likely to play
+                                 // Each longPulse selects from one of three scales below.                                    
+
+  0,1,2,3,4,5,6,7,8,9,10,        // chromatic 
+  0,0,2,2,4,4,6,6,8,8,10,        // whole tone
+  0,0,0,2,2,4,4,7,7,9,9};        // major pentatonic 
+
+byte key;                        // index to noteBase. Chooses the scale type.
+
+byte canShimmer;                 // Potential that a Shimmer could occur within a particular longPulse.
+                                 // Set by longPulse() using random(topShimmer).
+byte topShimmer = 8;             // High end of the range that canShimmer is compared to.
+                                 // Determines the odds that a Shimmer will occur. Must be at least
+                                 // willShimmer + 2 
+byte willShimmer = 6;            // 
+
+
+/*************************************************************************************************************
+/*                                                 MAIN
+/************************************************************************************************************/
+
+void setup() {
+  Serial.begin(31250);                              // MIDI serial must be at 31250. Too bad that doesn't work
+                                                    // with the Serial Monitor.
+  randomSeed(analogRead(0));                        // Get started randomly.
+  initMIDI();                                       // Set up the Fluxamasynth.
+}
+
+void loop() {
+
+    if (canShimmer > willShimmer ) {                // OK to Shimmer on this longPulse?
+      if (millis() > voice[3].toggleTime) {         // Check whether it's time to Shimmer
+        Shimmer(key);                               // Shimmer!
+        setShimmerTime();                           // Set the next time to Shimmer
+      }
+    }
+    
+  for (int j = 0; j < 3; j++) {
+    if (millis() >= voice[j].toggleTime) {          // Is it time to switch a note on or off?
+      if (voice[j].state) {                         // Is the voice turned on?
+        off(j);                                     // Ya well then turn it off
+      } 
+      else {                                        // voice was off
+        generateNote(j);                            // so make a new note
+        on(j);                                      // and turn it on
+      }
+    }
+  }
+  checkLongPulse();
+}
+
+
+/**************************************************************************************************************
+/                                                   MIDI Stuff
+/*************************************************************************************************************/
+
+void generateNote(byte ch) {
+  int newNote = random(1,12);                             // index for pitch (0 ... 11)
+  newNote = starterNote + noteBase[key][newNote];         // Establish a base pitch
+  newNote += 12 * random(4,6);                            // Place the new note in an audible octave
+  voice[ch].pitch = newNote;
+  int unicorn = random(0, map(longPulse, 300, 0, 1, 7));  // Value between 0 and 4
+  unicorn = (unicorn + (3 * unicorn != 0)) * 16;          // Could be 0 or between 64 and 112
+  voice[ch].velocity = unicorn;
+  voice[ch].toggleTime = millis() + random(256 - voice[ch].pitch, 20 * (256 - voice[ch].pitch));  // Future time to turn note off
+}
+
+void Shimmer(byte k) {
+  byte vel = map(longPulse,100,longPulse,40,60);          // Set a base velocity for this Shimmer in terms of the longPulse
+  byte ShimmerNote;
+                                                                  
+  for (int j = 0; j < 20; j++) {
+    ShimmerNote = random(0,12);
+    synth.noteOn(3, noteBase[k][ShimmerNote] + 108, vel + random(0,15));  // Play a note from the tone row in a high octave. Velocity varies.
+    delay(random(10,100));     
+  } 
+}
+
+
+void on(byte ch) {
+  synth.noteOn(ch, voice[ch].pitch, voice[ch].velocity);
+  voice[ch].state = true; 
+  longPulse--;
+}
+
+void off(byte ch) {
+  synth.noteOff(ch, voice[ch].pitch);
+  voice[ch].state = false;                       // Track that the note has turned off
+  voice[ch].toggleTime = millis() + random(longPulse + 100, 3000 - 2 * longPulse);  // Future time to turn note on
+  longPulse--;
+}
+
+void fadeOut() {
+                                                 // fade volume, notes off, reset volume
+  byte volChange = 1;                            // Amount to reduce the volume on each pass of the fade.
+  byte done = 0;                                 // Tracks whether all voices are at minimum value.
+  byte currentVolume[4];                         // Current volume for a voice. Starts at maxVol. 
+  for (byte j = 0; j < 4; j++) {
+    currentVolume[j] = voice[j].maxVol;
+  }
+  
+  if (done < 15) {
+    for (byte ch = 0; ch < 4; ch++) {
+      if (currentVolume[ch] > 5) {
+        currentVolume[ch] -= volChange;
+        synth.setChannelVolume(ch, currentVolume[ch]);
+        }
+      else {
+        done = done | 2 ^ ch;
+        }
+      delay(300);
+   }
+ }
+ 
+  for (byte k = 0; k < 4; k++) {
+    synth.allNotesOff(k);
+  }
+
+  delay(2000);                                        // Wait for all notes to finish their envelopes
+  // Turn the volume back up 
+  for (byte k = 0; k < 4; k++) {                      // Reset all channels back to volume 115
+    synth.setChannelVolume(k, voice[k].maxVol);
+  }
+}
+
+void patchSetup() {     
+
+  //GM patches for Fluxamasynth
+  synth.programChange( 0,  0,  89); //GM Warm Pad
+  voice[0].maxVol = 100;
+  synth.programChange( 0,  1,  5);  //GM E. Piano 2
+  voice[1].maxVol = 115;
+  synth.programChange( 0,  2,  78); //GM Whistle
+  voice[2].maxVol = 100;
+  synth.programChange( 0,  3,  5); //GM E. Piano 2: This is the Shimmer channel
+  voice[3].maxVol = 50; 
+
+// Effects
+  for (byte j = 0; j < 4; j++) {
+    synth.setReverb(j, 4, 100, 0); // Hall 2
+    synth.setChorus(j, 6, 100, 90, 200);
+  }
+}
+
+void initMIDI() {
+  synth.midiReset();
+  patchSetup();
+  for (int j = 0; j < 4; j++) {
+    synth.allNotesOff(j);
+    synth.setChannelVolume(j, voice[j].maxVol);       // Set Channel volume levels
+  }
+}
+
+/**************************************************************************************************************
+ * /                                                Timing
+/*************************************************************************************************************/
+
+void checkLongPulse() {                 // Have we played all the notes in the pulse?
+  if (longPulse < 1) {
+    fadeOut(); 
+                                        
+    delay(random(40000,100000));        // The pulse is complete. Let's have some sonic space
+                                        // ~40...~100 seconds of silence
+
+    setLongPulse();
+  }
+}
+
+void setLongPulse() {
+
+  longPulse = random(100, 300);         //number of notes that will be played in this pulse
+  key = random(0,3);                    // choose the scale
+  starterNote = random(5,16);           // base from which to calculate scale offsets.
+  canShimmer = random(1,topShimmer);    // Sets up possibilty of sparkling in this longPulse.
+  if (canShimmer > willShimmer) {       
+    setShimmerTime();
+  }
+  
+}
+
+void setShimmerTime() {
+          voice[3].toggleTime = millis() + random(50000,90000); // Set next Shimmer time.
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
